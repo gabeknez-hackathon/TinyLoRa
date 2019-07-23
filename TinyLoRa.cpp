@@ -46,13 +46,26 @@
  *
  */
 #include "TinyLoRa.h"
-#include <SPI.h>
+
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
+
+#define SPI_STRUCTS_VERSION 1
+
+#include <applibs/gpio.h>
+#include <applibs/log.h>
+#include <applibs/spi.h>
+
+// Assume this utility function for error checking SPI transfers is defined somewhere in the project.
+extern bool CheckTransferSize(const char *desc, size_t expectedBytes, ssize_t actualBytes);
+
+// Similarly for this atomic used to signal errors.
+extern volatile sig_atomic_t terminationRequired;
 
 extern uint8_t NwkSkey[16]; ///< Network Session Key
 extern uint8_t AppSkey[16]; ///< Application Session Key
 extern uint8_t DevAddr[4]; ///< Device Address
-
-static SPISettings RFM_spisettings = SPISettings(4000000, MSBFIRST, SPI_MODE0);
 
 /*
 *****************************************************************************************
@@ -61,7 +74,7 @@ static SPISettings RFM_spisettings = SPISettings(4000000, MSBFIRST, SPI_MODE0);
 */
 
 #ifdef AU915
-const unsigned char PROGMEM TinyLoRa::LoRa_Frequency[8][3] = {
+const unsigned char TinyLoRa::LoRa_Frequency[8][3] = {
 	{ 0xE5, 0x33, 0x5A },	//Channel 0 916.800 MHz / 61.035 Hz = 15020890 = 0xE5335A
 	{ 0xE5, 0x40, 0x26 },	//Channel 2 917.000 MHz / 61.035 Hz = 15024166 = 0xE54026
 	{ 0xE5, 0x4C, 0xF3 },	//Channel 3 917.200 MHz / 61.035 Hz = 15027443 = 0xE54CF3
@@ -74,7 +87,7 @@ const unsigned char PROGMEM TinyLoRa::LoRa_Frequency[8][3] = {
 #endif
 
 #ifdef EU863
-const unsigned char PROGMEM TinyLoRa::LoRa_Frequency[8][3] = {
+const unsigned char TinyLoRa::LoRa_Frequency[8][3] = {
 	{ 0xD9, 0x06, 0x8B },	//Channel 0 868.100 MHz / 61.035 Hz = 14222987 = 0xD9068B
 	{ 0xD9, 0x13, 0x58 },	//Channel 1 868.300 MHz / 61.035 Hz = 14226264 = 0xD91358
 	{ 0xD9, 0x20, 0x24 },	//Channel 2 868.500 MHz / 61.035 Hz = 14229540 = 0xD92024
@@ -88,7 +101,7 @@ const unsigned char PROGMEM TinyLoRa::LoRa_Frequency[8][3] = {
 #endif
 
 #ifdef US902
-const unsigned char PROGMEM TinyLoRa::LoRa_Frequency[8][3] = {
+const unsigned char TinyLoRa::LoRa_Frequency[8][3] = {
 	{ 0xE1, 0xF9, 0xC0 },		//Channel 0 903.900 MHz / 61.035 Hz = 14809536 = 0xE1F9C0
 	{ 0xE2, 0x06, 0x8C },		//Channel 1 904.100 MHz / 61.035 Hz = 14812812 = 0xE2068C
 	{ 0xE2, 0x13, 0x59},		//Channel 2 904.300 MHz / 61.035 Hz = 14816089 = 0xE21359
@@ -101,7 +114,7 @@ const unsigned char PROGMEM TinyLoRa::LoRa_Frequency[8][3] = {
 #endif
 
 #ifdef AS920
-const unsigned char PROGMEM TinyLoRa::LoRa_Frequency[8][3] = {
+const unsigned char TinyLoRa::LoRa_Frequency[8][3] = {
 	{ 0xE6, 0xCC, 0xF4 },		//Channel 0 868.100 MHz / 61.035 Hz = 15125748 = 0xE6CCF4
 	{ 0xE6, 0xD9, 0xC0 },		//Channel 1 868.300 MHz / 61.035 Hz = 15129024 = 0xE6D9C0
 	{ 0xE6, 0x8C, 0xF3 },		//Channel 2 868.500 MHz / 61.035 Hz = 15109363 = 0xE68CF3
@@ -120,7 +133,7 @@ const unsigned char PROGMEM TinyLoRa::LoRa_Frequency[8][3] = {
 *****************************************************************************************
 */
 
-const unsigned char PROGMEM TinyLoRa::S_Table[16][16] = {
+const unsigned char TinyLoRa::S_Table[16][16] = {
 	  {0x63,0x7C,0x77,0x7B,0xF2,0x6B,0x6F,0xC5,0x30,0x01,0x67,0x2B,0xFE,0xD7,0xAB,0x76},
 	  {0xCA,0x82,0xC9,0x7D,0xFA,0x59,0x47,0xF0,0xAD,0xD4,0xA2,0xAF,0x9C,0xA4,0x72,0xC0},
 	  {0xB7,0xFD,0x93,0x26,0x36,0x3F,0xF7,0xCC,0x34,0xA5,0xE5,0xF1,0x71,0xD8,0x31,0x15},
@@ -207,51 +220,51 @@ void TinyLoRa::setChannel(rfm_channels_t channel) {
   switch (channel)
   {
     case CH0:
-      _rfmLSB = pgm_read_byte(&(LoRa_Frequency[0][2]));
-      _rfmMID = pgm_read_byte(&(LoRa_Frequency[0][1]));
-      _rfmMSB = pgm_read_byte(&(LoRa_Frequency[0][0]));
+      _rfmLSB = LoRa_Frequency[0][2];
+      _rfmMID = LoRa_Frequency[0][1];
+      _rfmMSB = LoRa_Frequency[0][0];
       _isMultiChan = 0;
       break;
     case CH1:
-      _rfmLSB = pgm_read_byte(&(LoRa_Frequency[1][2]));
-      _rfmMID = pgm_read_byte(&(LoRa_Frequency[1][1]));
-      _rfmMSB = pgm_read_byte(&(LoRa_Frequency[1][0]));
+      _rfmLSB = LoRa_Frequency[1][2];
+      _rfmMID = LoRa_Frequency[1][1];
+      _rfmMSB = LoRa_Frequency[1][0];
       _isMultiChan = 0;
       break;
     case CH2:
-      _rfmLSB = pgm_read_byte(&(LoRa_Frequency[2][2]));
-      _rfmMID = pgm_read_byte(&(LoRa_Frequency[2][1]));
-      _rfmMSB = pgm_read_byte(&(LoRa_Frequency[2][0]));
+      _rfmLSB = LoRa_Frequency[2][2];
+      _rfmMID = LoRa_Frequency[2][1];
+      _rfmMSB = LoRa_Frequency[2][0];
       _isMultiChan = 0;
       break;
     case CH3:
-      _rfmLSB = pgm_read_byte(&(LoRa_Frequency[3][2]));
-      _rfmMID = pgm_read_byte(&(LoRa_Frequency[3][1]));
-      _rfmMSB = pgm_read_byte(&(LoRa_Frequency[3][0]));
+      _rfmLSB = LoRa_Frequency[3][2];
+      _rfmMID = LoRa_Frequency[3][1];
+      _rfmMSB = LoRa_Frequency[3][0];
       _isMultiChan = 0;
       break;
     case CH4:
-      _rfmLSB = pgm_read_byte(&(LoRa_Frequency[4][2]));
-      _rfmMID = pgm_read_byte(&(LoRa_Frequency[4][1]));
-      _rfmMSB = pgm_read_byte(&(LoRa_Frequency[4][0]));
+      _rfmLSB = LoRa_Frequency[4][2];
+      _rfmMID = LoRa_Frequency[4][1];
+      _rfmMSB = LoRa_Frequency[4][0];
       _isMultiChan = 0;
       break;
     case CH5:
-      _rfmLSB = pgm_read_byte(&(LoRa_Frequency[5][2]));
-      _rfmMID = pgm_read_byte(&(LoRa_Frequency[5][1]));
-      _rfmMSB = pgm_read_byte(&(LoRa_Frequency[5][0]));
+      _rfmLSB = LoRa_Frequency[5][2];
+      _rfmMID = LoRa_Frequency[5][1];
+      _rfmMSB = LoRa_Frequency[5][0];
       _isMultiChan = 0;
       break;
     case CH6:
-      _rfmLSB = pgm_read_byte(&(LoRa_Frequency[6][2]));
-      _rfmMID = pgm_read_byte(&(LoRa_Frequency[6][1]));
-      _rfmMSB = pgm_read_byte(&(LoRa_Frequency[6][0]));
+      _rfmLSB = LoRa_Frequency[6][2];
+      _rfmMID = LoRa_Frequency[6][1];
+      _rfmMSB = LoRa_Frequency[6][0];
       _isMultiChan = 0;
       break;
     case CH7:
-      _rfmLSB = pgm_read_byte(&(LoRa_Frequency[7][2]));
-      _rfmMID = pgm_read_byte(&(LoRa_Frequency[7][1]));
-      _rfmMSB = pgm_read_byte(&(LoRa_Frequency[7][0]));
+      _rfmLSB = LoRa_Frequency[7][2];
+      _rfmMID = LoRa_Frequency[7][1];
+      _rfmMSB = LoRa_Frequency[7][0];
       _isMultiChan = 0;
       break;
     case MULTI:
@@ -267,6 +280,8 @@ void TinyLoRa::setChannel(rfm_channels_t channel) {
 /*!
     @brief  Instanciates a new TinyLoRa class, including assigning
             irq and cs pins to the RFM breakout.
+    @param    rfm_spi
+              The RFM module's SPI bus.
     @param    rfm_irq
               The RFM module's interrupt pin (rfm_nss).
     @param    rfm_nss
@@ -275,7 +290,8 @@ void TinyLoRa::setChannel(rfm_channels_t channel) {
               The RFM module's reset pin (rfm_rst).
 */
 /**************************************************************************/
-TinyLoRa::TinyLoRa(int8_t rfm_irq, int8_t rfm_nss, int8_t rfm_rst) {
+TinyLoRa::TinyLoRa(int8_t rfm_spi, int8_t rfm_irq, int8_t rfm_nss, int8_t rfm_rst) {
+  _spi = rfm_spi;
   _irq = rfm_irq;
   _cs = rfm_nss;
   _rst = rfm_rst;
@@ -295,27 +311,56 @@ TinyLoRa::TinyLoRa(int8_t rfm_irq, int8_t rfm_nss, int8_t rfm_rst) {
 bool TinyLoRa::begin() 
 {
 
+  SPIMaster_Config config;
+  int ret = SPIMaster_InitConfig(&config);
+  if (ret != 0) {
+      Log_Debug("ERROR: SPIMaster_InitConfig = %d errno = %s (%d)\n", ret, strerror(errno),
+                errno);
+      return 0;
+  }
+  config.csPolarity = SPI_ChipSelectPolarity_ActiveLow;
+
   // start and configure SPI
-  SPI.begin();
-  
-  // RFM _cs as output
-  pinMode(_cs, OUTPUT);
+  _spiFd = SPIMaster_Open(_spi, _cs, &config);
+  if (_spiFd < 0) {
+      Log_Debug("ERROR: SPIMaster_Open: errno=%d (%s)\n", errno, strerror(errno));
+      return 0;
+  }
+
+  // (_cs is automatically opened as output)
+  // pinMode(_cs, OUTPUT);
 
   // RFM _irq as input
-  pinMode(_irq, INPUT);
+  _irqFd = GPIO_OpenAsInput(_irq);
+  if (_irqFd < 0) {
+      Log_Debug("ERROR: Could not open interrupt GPIO: %s (%d).\n", strerror(errno), errno);
+      return -1;
+  }
 
   if (_rst > 0){
     // RFM _rst as output
-    pinMode(_rst, OUTPUT);
+    _rstFd = GPIO_OpenAsInput(_rst);
+    if (_rstFd < 0) {
+        Log_Debug("ERROR: Could not open reset GPIO: %s (%d).\n", strerror(errno), errno);
+        return -1;
+    }
 
     // Reset the RFM radio module
-    digitalWrite(_rst, LOW);
+    ret = GPIO_SetValue(_rstFd, GPIO_Value_Low);
+    if (ret != 0) {
+        Log_Debug("ERROR: Could not set reset output value low: %s (%d).\n", strerror(errno), errno);
+        return -1;
+    }
 
-    delay(0.1);
+    sleep(0.1);
 
-    digitalWrite(_rst, HIGH);
+    ret = GPIO_SetValue(_rstFd, GPIO_Value_High);
+    if (ret != 0) {
+        Log_Debug("ERROR: Could not set reset output value high: %s (%d).\n", strerror(errno), errno);
+        return -1;
+    }
 
-    delay(5);
+    sleep(5);
   }
 
   // Reset the radio module on init
@@ -382,16 +427,16 @@ void TinyLoRa::RFM_Send_Package(unsigned char *RFM_Tx_Package, unsigned char Pac
   RFM_Write(MODE_STDBY,0x81);
   
   // wait for standby mode
-  delay(10);
+  sleep(10);
   
   //Switch _irq to TxDone
   RFM_Write(0x40,0x40);
 
   // select rfm channel
   if (_isMultiChan == 1) {
-    RFM_Write(REG_FRF_MSB, pgm_read_byte(&(LoRa_Frequency[randomNum][0])));
-    RFM_Write(REG_FRF_MID, pgm_read_byte(&(LoRa_Frequency[randomNum][1])));
-    RFM_Write(REG_FRF_LSB, pgm_read_byte(&(LoRa_Frequency[randomNum][2])));
+    RFM_Write(REG_FRF_MSB, LoRa_Frequency[randomNum][0]);
+    RFM_Write(REG_FRF_MID, LoRa_Frequency[randomNum][1]);
+    RFM_Write(REG_FRF_LSB, LoRa_Frequency[randomNum][2]);
   } else {
     RFM_Write(REG_FRF_MSB, _rfmMSB);
     RFM_Write(REG_FRF_MID, _rfmMID);
@@ -419,10 +464,18 @@ void TinyLoRa::RFM_Send_Package(unsigned char *RFM_Tx_Package, unsigned char Pac
   RFM_Write(0x01,MODE_TX);
 
   //Wait _irq to pull high
-  while(digitalRead(_irq) == LOW)
-  {
-    
-  }
+  GPIO_Value_Type interruptState;
+  int result;
+  do {
+    result = GPIO_GetValue(_irqFd, &interruptState);
+    if (result != 0) {
+        Log_Debug("ERROR: Could not read interrupt GPIO: %s (%d).\n", strerror(errno), errno);
+        terminationRequired = true;
+        return;
+    }
+
+  } while (interruptState == GPIO_Value_Low);
+  
   //Switch RFM to sleep
   RFM_Write(0x01,MODE_SLEEP);
 }
@@ -439,26 +492,32 @@ void TinyLoRa::RFM_Send_Package(unsigned char *RFM_Tx_Package, unsigned char Pac
 void TinyLoRa::RFM_Write(unsigned char RFM_Address, unsigned char RFM_Data) 
 {
   #ifdef DEBUG
-    Serial.print("SPI Write ADDR: ");
-    Serial.print(RFM_Address, HEX);
-    Serial.print(" DATA: ");
-    Serial.println(RFM_Data, HEX);
+    Log_Debug("SPI Write ADDR: %x DATA: %x\n", RFM_Address, RFM_Data);
   #endif
 
-  SPI.beginTransaction(RFM_spisettings);
+  const size_t transferCount = 1;
+  SPIMaster_Transfer transfer;
 
-  //Set NSS pin Low to start communication
-  digitalWrite(_cs, LOW);
+  int result = SPIMaster_InitTransfers(&transfer, transferCount);
+  if (result != 0) {
+    Log_Debug("ERROR: Could not init SPI transfer: %s (%d).\n", strerror(errno), errno);
+    terminationRequired = true;
+    return;
+  }
 
-  //Send Address with MSB 1 to make it a writ command
-  SPI.transfer(RFM_Address | 0x80);
-  //Send Data
-  SPI.transfer(RFM_Data);
+  //Send Address with MSB 1 to make it a write command
+  const uint8_t transferData[] = {RFM_Address | 0x80, RFM_Data};
 
-  //Set NSS pin High to end communication
-  digitalWrite(_cs, HIGH);
+  transfer.flags = SPI_TransferFlags_Write;
+  transfer.writeData = transferData;
+  transfer.length = sizeof(transferData);
 
-  SPI.endTransaction();
+  ssize_t transferredBytes = SPIMaster_TransferSequential(_spiFd, &transfer, transferCount);
+  if (!CheckTransferSize("SPIMaster_TransferSequential (RFM_Write)", transfer.length, transferredBytes)) {
+    terminationRequired = true;
+    return;
+  }
+
 }
 
 /**************************************************************************/
@@ -470,26 +529,19 @@ void TinyLoRa::RFM_Write(unsigned char RFM_Address, unsigned char RFM_Data)
 */
 /**************************************************************************/
 uint8_t TinyLoRa::RFM_Read(uint8_t RFM_Address) {
-    
-    SPI.beginTransaction(RFM_spisettings);
-    
-    digitalWrite(_cs, LOW);
-    
-    SPI.transfer(RFM_Address & 0x7F);
-    
-    uint8_t RFM_Data = SPI.transfer(0x00);
-    
-    digitalWrite(_cs, HIGH);
 
-    SPI.endTransaction();
+  uint8_t RFM_Data;
 
-    #ifdef DEBUG
-      Serial.print("SPI Read ADDR: ");
-      Serial.print(RFM_Address, HEX);
-      Serial.print(" DATA: ");
-      Serial.println(RFM_Data, HEX);
-    #endif
-    return RFM_Data;
+  size_t transferredBytes = SPIMaster_WriteThenRead(_spiFd, &RFM_Address, sizeof(RFM_Address), &RFM_Data, sizeof(RFM_Data));
+  if (!CheckTransferSize("SPIMaster_WriteThenRead (RFM_Read)", sizeof(RFM_Address) + sizeof(RFM_Data), transferredBytes)) {
+    terminationRequired = true;
+    return 0;
+  }
+
+  #ifdef DEBUG
+    Log_Debug("SPI Read ADDR: %x DATA: %x\n", RFM_Address, RFM_Data);
+  #endif
+  return RFM_Data;
 }
 /**************************************************************************/
 /*!
@@ -555,8 +607,7 @@ void TinyLoRa::sendData(unsigned char *Data, unsigned char Data_Length, unsigned
   //Add data Lenth to package length
   RFM_Package_Length = RFM_Package_Length + Data_Length;
   #ifdef DEBUG
-    Serial.print("Package length: ");
-    Serial.println(RFM_Package_Length);
+    Log_Debug("Package length: %u\n", RFM_Package_Length);
   #endif
   
   //Calculate MIC
@@ -574,7 +625,7 @@ void TinyLoRa::sendData(unsigned char *Data, unsigned char Data_Length, unsigned
   //Send Package
   RFM_Send_Package(RFM_Data, RFM_Package_Length);
   #ifdef DEBUG
-    Serial.println("sent package!");
+    Log_Debug("sent package!\n");
   #endif
 }
 
@@ -1076,7 +1127,7 @@ unsigned char TinyLoRa::AES_Sub_Byte(unsigned char Byte)
 //  S_Byte   = S_Table [S_Row][S_Collum];
 
   //return S_Table [ ((Byte >> 4) & 0x0F) ] [ ((Byte >> 0) & 0x0F) ]; // original
-  return pgm_read_byte(&(S_Table [((Byte >> 4) & 0x0F)] [((Byte >> 0) & 0x0F)]));
+  return S_Table [((Byte >> 4) & 0x0F)] [((Byte >> 0) & 0x0F)];
 }
 
 /**************************************************************************/
